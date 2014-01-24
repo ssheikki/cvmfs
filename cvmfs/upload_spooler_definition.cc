@@ -43,6 +43,8 @@ SpoolerDefinition::SpoolerDefinition(
     driver_type = Local;
   } else if (upstream[0] == "riak") {
     driver_type = Riak;
+  } else if (upstream[0] == "S3") {
+    driver_type = S3;
   } else if (upstream[0] == "mock") {
     driver_type = Unknown; // for unit testing purpose only!
   } else {

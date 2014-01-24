@@ -1328,7 +1328,7 @@ mkfs() {
   check_repository_existence $name  && die "The repository $name already exists"
   is_root                           || die "Only root can create a new repository"
   check_upstream_validity $upstream
-  is_local_upstream $upstream       || die "Import is only supported for local storage"
+#  is_local_upstream $upstream       || die "Import is only supported for local storage"
   if [ $unionfs = "overlayfs" ]; then
     check_overlayfs                 || die "overlayfs kernel module missing"
     echo "Warning: CernVM-FS filesystems using overlayfs may not enforce hard link semantics during publishing."
@@ -1337,7 +1337,7 @@ mkfs() {
   fi
   check_cvmfs2_client               || die "cvmfs client missing"
   check_autofs_on_cvmfs             && die "Autofs on /cvmfs has to be disabled"
-  check_apache                      || die "Apache must be installed and running"
+#  check_apache                      || die "Apache must be installed and running"
   lower_hardlink_restrictions
   ensure_enabled_apache_modules
 
@@ -1358,7 +1358,7 @@ mkfs() {
   # create storage and mountpoints
   echo -n "Create CernVM-FS Storage... "
   create_spool_area_for_new_repository $name "with storage skeleton"
-  reload_apache > /dev/null
+#  reload_apache > /dev/null
   echo "done"
 
   # get information about new repository
@@ -1813,7 +1813,7 @@ rmfs() {
       local repository_dir=$(get_upstream_config $upstream)
       if [ "x"$repository_dir != x ]; then
         echo -n "Removing repository storage... "
-        rm -rf $repository_dir
+        #rm -rf $repository_dir
         echo "done"
       fi
     elif is_riak_upstream $upstream; then
@@ -1827,10 +1827,10 @@ rmfs() {
           /etc/cvmfs/keys/$name.key \
           /etc/cvmfs/keys/$name.crt
     fi
-    if is_local_upstream $upstream; then
-      remove_apache_config_file "cvmfs.${name}.conf"
-      reload_apache > /dev/null
-    fi
+    #if is_local_upstream $upstream; then
+    #  remove_apache_config_file "cvmfs.${name}.conf"
+    #  reload_apache > /dev/null
+    #fi
     sed -i -e "/added by CernVM-FS for ${name}/d" /etc/sudoers
     rm -rf /etc/cvmfs/repositories.d/$name
     echo "done"
