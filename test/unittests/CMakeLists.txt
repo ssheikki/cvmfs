@@ -60,6 +60,8 @@ set (CVMFS_UNITTEST_SOURCES
   ${CVMFS_SOURCE_DIR}/shortstring.h
   ${CVMFS_SOURCE_DIR}/sanitizer.h
   ${CVMFS_SOURCE_DIR}/sanitizer.cc
+  ${CVMFS_SOURCE_DIR}/options.h
+  ${CVMFS_SOURCE_DIR}/options.cc 
 
   ${CVMFS_SOURCE_DIR}/catalog_counters.h
   ${CVMFS_SOURCE_DIR}/catalog_counters.cc
