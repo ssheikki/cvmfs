@@ -97,6 +97,7 @@
 #include "history.h"
 #include "manifest_fetch.h"
 #include "auto_umount.h"
+#include "cvmfs_simple.h"
 
 #ifdef FUSE_CAP_EXPORT_SUPPORT
 #define CVMFS_NFS_SUPPORT
@@ -159,6 +160,7 @@ struct DirectoryListing {
 const loader::LoaderExports *loader_exports_ = NULL;
 bool foreground_ = false;
 bool nfs_maps_ = false;
+bool shell_ = false;
 string *mountpoint_ = NULL;
 string *cachedir_ = NULL;
 string *nfs_shared_dir_ = NULL;
@@ -1712,6 +1714,10 @@ static void SetCvmfsOperations(struct fuse_lowlevel_ops *cvmfs_operations) {
   cvmfs_operations->forget      = cvmfs_forget;
 }
 
+static void SetSimpleOps(loader::CvmfsSimpleOps *simple_ops) {
+  
+}
+
 }  // namespace cvmfs
 
 
@@ -1762,6 +1768,90 @@ static void LogSqliteError(void *user_data __attribute__((unused)),
 }
 
 
+static void InitOptions(const loader::LoaderExports *loader_exports) {
+  options::Init();
+  if (loader_exports->config_files != "") {
+    vector<string> tokens = SplitString(loader_exports->config_files, ':');
+    for (unsigned i = 0, s = tokens.size(); i < s; ++i) {
+      options::ParsePath(tokens[i]);
+    }
+  } else {
+    options::ParseDefault(loader_exports->repository_name);
+  }
+  g_options_ready = true;
+  string parameter;
+
+  // Logging
+  if (options::GetValue("CVMFS_SYSLOG_LEVEL", &parameter))
+    SetLogSyslogLevel(String2Uint64(parameter));
+  else
+    SetLogSyslogLevel(3);
+  if (options::GetValue("CVMFS_SYSLOG_FACILITY", &parameter))
+    SetLogSyslogFacility(String2Int64(parameter));
+  if (options::GetValue("CVMFS_USYSLOG", &parameter))
+    SetLogMicroSyslog(parameter);
+  if (options::GetValue("CVMFS_DEBUGLOG", &parameter))
+    SetLogDebugFile(parameter);
+  SetLogSyslogPrefix(loader_exports->repository_name);
+
+  LogCvmfs(kLogCvmfs, kLogDebug, "Options:\n%s", options::Dump().c_str());
+}
+
+
+static void InitMemCaches(const uint64_t mem_cache_size) {
+  int retval;
+  // Tune SQlite3
+  sqlite3_shutdown();  // Make sure SQlite starts clean after initialization
+  retval = sqlite3_config(SQLITE_CONFIG_LOG, LogSqliteError, NULL);
+  assert(retval == SQLITE_OK);
+  retval = sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
+  assert(retval == SQLITE_OK);
+  g_sqlite_scratch = smalloc(8192*16);  // 8 KB for 8 threads (2 slots per thread)
+  g_sqlite_page_cache = smalloc(1280*3275);  // 4MB
+  retval = sqlite3_config(SQLITE_CONFIG_SCRATCH, g_sqlite_scratch, 8192, 16);
+  assert(retval == SQLITE_OK);
+  retval = sqlite3_config(SQLITE_CONFIG_PAGECACHE, g_sqlite_page_cache,
+                          1280, 3275);
+  assert(retval == SQLITE_OK);
+  // 4 KB
+  retval = sqlite3_config(SQLITE_CONFIG_LOOKASIDE, 32, 128);
+  assert(retval == SQLITE_OK);
+
+  // Meta-data memory caches
+  const double memcache_unit_size =
+    7.0 * lru::Md5PathCache::GetEntrySize() +
+    lru::InodeCache::GetEntrySize() + lru::PathCache::GetEntrySize();
+  const unsigned memcache_num_units =
+    mem_cache_size / static_cast<unsigned>(memcache_unit_size);
+  // Number of cache entries must be a multiple of 64
+  const unsigned mask_64 = ~((1 << 6) - 1);
+  cvmfs::inode_cache_ = new lru::InodeCache(memcache_num_units & mask_64);
+  cvmfs::path_cache_ = new lru::PathCache(memcache_num_units & mask_64);
+  cvmfs::md5path_cache_ =
+    new lru::Md5PathCache((memcache_num_units*7) & mask_64);
+  cvmfs::inode_tracker_ = new glue::InodeTracker();
+
+  cvmfs::directory_handles_ = new cvmfs::DirectoryHandles();
+  cvmfs::directory_handles_->set_empty_key((uint64_t)(-1));
+  cvmfs::directory_handles_->set_deleted_key((uint64_t)(-2));
+  cvmfs::chunk_tables_ = new ChunkTables();
+  cvmfs::backoff_throttle_ = new BackoffThrottle();
+}
+
+
+static void InitCounters() {
+  atomic_init64(&cvmfs::num_fs_open_);
+  atomic_init64(&cvmfs::num_fs_dir_open_);
+  atomic_init64(&cvmfs::num_fs_lookup_);
+  atomic_init64(&cvmfs::num_fs_lookup_negative_);
+  atomic_init64(&cvmfs::num_fs_stat_);
+  atomic_init64(&cvmfs::num_fs_read_);
+  atomic_init64(&cvmfs::num_fs_readlink_);
+  atomic_init64(&cvmfs::num_fs_forget_);
+  atomic_init32(&cvmfs::num_io_error_);
+}
+
+
 static int Init(const loader::LoaderExports *loader_exports) {
   int retval;
   g_boot_error = new string("unknown error");
@@ -1798,37 +1888,13 @@ static int Init(const loader::LoaderExports *loader_exports) {
   uint64_t initial_generation = 0;
 
   cvmfs::boot_time_ = loader_exports->boot_time;
-  cvmfs::backoff_throttle_ = new BackoffThrottle();
+  if (loader_exports->version >= 3)
+    cvmfs::shell_ = loader_exports->shell;
 
-  // Option parsing
-  options::Init();
-  if (loader_exports->config_files != "") {
-    vector<string> tokens = SplitString(loader_exports->config_files, ':');
-    for (unsigned i = 0, s = tokens.size(); i < s; ++i) {
-      options::ParsePath(tokens[i]);
-    }
-  } else {
-    options::ParseDefault(loader_exports->repository_name);
-  }
-  g_options_ready = true;
-  string parameter;
-
-  // Logging
-  if (options::GetValue("CVMFS_SYSLOG_LEVEL", &parameter))
-    SetLogSyslogLevel(String2Uint64(parameter));
-  else
-    SetLogSyslogLevel(3);
-  if (options::GetValue("CVMFS_SYSLOG_FACILITY", &parameter))
-    SetLogSyslogFacility(String2Int64(parameter));
-  if (options::GetValue("CVMFS_USYSLOG", &parameter))
-    SetLogMicroSyslog(parameter);
-  if (options::GetValue("CVMFS_DEBUGLOG", &parameter))
-    SetLogDebugFile(parameter);
-  SetLogSyslogPrefix(loader_exports->repository_name);
-
-  LogCvmfs(kLogCvmfs, kLogDebug, "Options:\n%s", options::Dump().c_str());
+  InitOptions(loader_exports);
 
   // Overwrite default options
+  string parameter;
   if (options::GetValue("CVMFS_MEMCACHE_SIZE", &parameter))
     mem_cache_size = String2Uint64(parameter) * 1024*1024;
   if (options::GetValue("CVMFS_TIMEOUT", &parameter))
@@ -1944,52 +2010,9 @@ static int Init(const loader::LoaderExports *loader_exports) {
   LogCvmfs(kLogCvmfs, kLogDebug, "kernel caches expire after %d seconds",
            int(cvmfs::kcache_timeout_));
 
-  // Tune SQlite3
-  sqlite3_shutdown();  // Make sure SQlite starts clean after initialization
-  retval = sqlite3_config(SQLITE_CONFIG_LOG, LogSqliteError, NULL);
-  assert(retval == SQLITE_OK);
-  retval = sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
-  assert(retval == SQLITE_OK);
-  g_sqlite_scratch = smalloc(8192*16);  // 8 KB for 8 threads (2 slots per thread)
-  g_sqlite_page_cache = smalloc(1280*3275);  // 4MB
-  retval = sqlite3_config(SQLITE_CONFIG_SCRATCH, g_sqlite_scratch, 8192, 16);
-  assert(retval == SQLITE_OK);
-  retval = sqlite3_config(SQLITE_CONFIG_PAGECACHE, g_sqlite_page_cache,
-                          1280, 3275);
-  assert(retval == SQLITE_OK);
-  // 4 KB
-  retval = sqlite3_config(SQLITE_CONFIG_LOOKASIDE, 32, 128);
-  assert(retval == SQLITE_OK);
+  InitMemCaches(mem_cache_size);
 
-  // Meta-data memory caches
-  const double memcache_unit_size =
-    7.0 * lru::Md5PathCache::GetEntrySize() +
-    lru::InodeCache::GetEntrySize() + lru::PathCache::GetEntrySize();
-  const unsigned memcache_num_units =
-    mem_cache_size / static_cast<unsigned>(memcache_unit_size);
-  // Number of cache entries must be a multiple of 64
-  const unsigned mask_64 = ~((1 << 6) - 1);
-  cvmfs::inode_cache_ = new lru::InodeCache(memcache_num_units & mask_64);
-  cvmfs::path_cache_ = new lru::PathCache(memcache_num_units & mask_64);
-  cvmfs::md5path_cache_ =
-    new lru::Md5PathCache((memcache_num_units*7) & mask_64);
-  cvmfs::inode_tracker_ = new glue::InodeTracker();
-
-  cvmfs::directory_handles_ = new cvmfs::DirectoryHandles();
-  cvmfs::directory_handles_->set_empty_key((uint64_t)(-1));
-  cvmfs::directory_handles_->set_deleted_key((uint64_t)(-2));
-  cvmfs::chunk_tables_ = new ChunkTables();
-
-  // Runtime counters
-  atomic_init64(&cvmfs::num_fs_open_);
-  atomic_init64(&cvmfs::num_fs_dir_open_);
-  atomic_init64(&cvmfs::num_fs_lookup_);
-  atomic_init64(&cvmfs::num_fs_lookup_negative_);
-  atomic_init64(&cvmfs::num_fs_stat_);
-  atomic_init64(&cvmfs::num_fs_read_);
-  atomic_init64(&cvmfs::num_fs_readlink_);
-  atomic_init64(&cvmfs::num_fs_forget_);
-  atomic_init32(&cvmfs::num_io_error_);
+  InitCounters();
 
   // Create cache directory, if necessary
   if (!MkdirDeep(*cvmfs::cachedir_, 0700)) {
@@ -2298,6 +2321,8 @@ static int Init(const loader::LoaderExports *loader_exports) {
   cvmfs::remount_fence_ = new cvmfs::RemountFence();
   auto_umount::SetMountpoint(*cvmfs::mountpoint_);
 
+  simple::Init(cvmfs::catalog_manager_);
+
   return loader::kFailOk;
 }
 
@@ -2362,6 +2387,8 @@ static string GetErrorMsg() {
 static void Fini() {
   signal(SIGALRM, SIG_IGN);
   if (g_talk_ready) talk::Fini();
+
+  simple::Fini();
 
   // Must be before quota is stopped
   delete cvmfs::catalog_manager_;
@@ -2680,6 +2707,8 @@ static void __attribute__((constructor)) LibraryMain() {
   g_cvmfs_exports->fnRestoreState = RestoreState;
   g_cvmfs_exports->fnFreeSavedState = FreeSavedState;
   cvmfs::SetCvmfsOperations(&g_cvmfs_exports->cvmfs_operations);
+  g_cvmfs_exports->simple_ops = new loader::CvmfsSimpleOps();
+  cvmfs::SetSimpleOps(g_cvmfs_exports->simple_ops);
 }
 
 

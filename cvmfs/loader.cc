@@ -42,6 +42,7 @@
 #include "atomic.h"
 #include "loader_talk.h"
 #include "sanitizer.h"
+#include "shell.h"
 
 using namespace std;  // NOLINT
 
@@ -55,6 +56,7 @@ struct CvmfsOptions {
   int grab_mountpoint;
   int cvmfs_suid;
   int disable_watchdog;
+  int shell;
 
   // Ignored options
   int ign_netdev;
@@ -83,6 +85,7 @@ static struct fuse_opt cvmfs_array_opts[] = {
   CVMFS_SWITCH("grab_mountpoint",  grab_mountpoint),
   CVMFS_SWITCH("cvmfs_suid",       cvmfs_suid),
   CVMFS_SWITCH("disable_watchdog", disable_watchdog),
+  CVMFS_SWITCH("shell",            shell),
 
   // Ignore these options
   CVMFS_SWITCH("_netdev",          ign_netdev),
@@ -120,6 +123,7 @@ bool grab_mountpoint_ = false;
 bool parse_options_only_ = false;
 bool suid_mode_ = false;
 bool disable_watchdog_ = false;
+bool shell_ = false;
 atomic_int32 blocking_;
 atomic_int64 num_operations_;
 void *library_handle_;
@@ -150,6 +154,7 @@ static void Usage(const string &exename) {
     "  -o parse             Parse and print cvmfs parameters\n"
     "  -o cvmfs_suid        Enable suid mode\n\n"
     "  -o disable_watchdog  Do not spawn a post mortem crash handler\n"
+    "  -o shell             Do not mount but open the cvmfs shell\n"
     "Fuse mount options:\n"
     "  -o allow_other       allow access to other users\n"
     "  -o allow_root        allow access to root\n"
@@ -403,6 +408,7 @@ static fuse_args *ParseCmdLine(int argc, char *argv[]) {
   grab_mountpoint_ = cvmfs_options.grab_mountpoint;
   suid_mode_ = cvmfs_options.cvmfs_suid;
   disable_watchdog_ = cvmfs_options.disable_watchdog;
+  shell_ = cvmfs_options.shell;
 
   return mount_options;
 }
@@ -704,6 +710,7 @@ int main(int argc, char *argv[]) {
   loader_exports_->repository_name = *repository_name_;
   loader_exports_->mount_point = *mount_point_;
   loader_exports_->disable_watchdog = disable_watchdog_;
+  loader_exports_->shell = shell_;
   if (config_files_)
     loader_exports_->config_files = *config_files_;
   else
@@ -843,13 +850,15 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  struct fuse_chan *channel;
-  channel = fuse_mount(mount_point_->c_str(), mount_options);
-  if (!channel) {
-    LogCvmfs(kLogCvmfs, kLogStderr | kLogSyslogErr,
-             "failed to create Fuse channel");
-    cvmfs_exports_->fnFini();
-    return kFailMount;
+  struct fuse_chan *channel = NULL;
+  if (!shell_) {
+    channel = fuse_mount(mount_point_->c_str(), mount_options);
+    if (!channel) {
+      LogCvmfs(kLogCvmfs, kLogStderr | kLogSyslogErr,
+               "failed to create Fuse channel");
+      cvmfs_exports_->fnFini();
+      return kFailMount;
+    }
   }
 
   // drop credentials
@@ -865,49 +874,60 @@ int main(int argc, char *argv[]) {
 
   struct fuse_lowlevel_ops loader_operations;
   SetFuseOperations(&loader_operations);
-  struct fuse_session *session;
-  session = fuse_lowlevel_new(mount_options, &loader_operations,
-                              sizeof(loader_operations), NULL);
-  if (!session) {
-    LogCvmfs(kLogCvmfs, kLogStderr | kLogSyslogErr,
-             "failed to create Fuse session");
-    fuse_unmount(mount_point_->c_str(), channel);
-    cvmfs_exports_->fnFini();
-    return kFailMount;
-  }
 
-  LogCvmfs(kLogCvmfs, kLogStdout, "CernVM-FS: mounted cvmfs on %s",
-           mount_point_->c_str());
-  LogCvmfs(kLogCvmfs, kLogSyslog,
-           "CernVM-FS: linking %s to repository %s",
-           mount_point_->c_str(), repository_name_->c_str());
-  if (!foreground_)
-    Daemonize();
+  struct fuse_session *session = NULL;
+  if (!shell_) {
+    session = fuse_lowlevel_new(mount_options, &loader_operations,
+                                sizeof(loader_operations), NULL);
+    if (!session) {
+      LogCvmfs(kLogCvmfs, kLogStderr | kLogSyslogErr,
+               "failed to create Fuse session");
+      fuse_unmount(mount_point_->c_str(), channel);
+      cvmfs_exports_->fnFini();
+      return kFailMount;
+    }
+
+    LogCvmfs(kLogCvmfs, kLogStdout, "CernVM-FS: mounted cvmfs on %s",
+             mount_point_->c_str());
+    LogCvmfs(kLogCvmfs, kLogSyslog,
+             "CernVM-FS: linking %s to repository %s",
+             mount_point_->c_str(), repository_name_->c_str());
+    if (!foreground_)
+      Daemonize();
+  }
 
   cvmfs_exports_->fnSpawn();
   loader_talk::Spawn();
 
   SetLogMicroSyslog("");
-  retval = fuse_set_signal_handlers(session);
-  assert(retval == 0);
-  fuse_session_add_chan(session, channel);
-  if (single_threaded_)
-    retval = fuse_session_loop(session);
-  else
-    retval = fuse_session_loop_mt(session);
-  SetLogMicroSyslog(*usyslog_path_);
+  if (!shell_) {
+    retval = fuse_set_signal_handlers(session);
+    assert(retval == 0);
+    fuse_session_add_chan(session, channel);
+    if (single_threaded_)
+      retval = fuse_session_loop(session);
+    else
+      retval = fuse_session_loop_mt(session);
+    SetLogMicroSyslog(*usyslog_path_);
+  } else {
+    LogCvmfs(kLogCvmfs, kLogStdout, "Entering CernVM-FS shell...");
+    shell::Shell cvmfs_shell;
+    retval = cvmfs_shell.Enter(loader_exports_, cvmfs_exports_);
+  }
 
   loader_talk::Fini();
   cvmfs_exports_->fnFini();
 
   // Unmount
-  fuse_session_remove_chan(channel);
-  fuse_remove_signal_handlers(session);
-  fuse_session_destroy(session);
-  fuse_unmount(mount_point_->c_str(), channel);
-  fuse_opt_free_args(mount_options);
-  channel = NULL;
-  session = NULL;
+  if (!shell_) {
+    fuse_session_remove_chan(channel);
+    fuse_remove_signal_handlers(session);
+    fuse_session_destroy(session);
+    fuse_unmount(mount_point_->c_str(), channel);
+    fuse_opt_free_args(mount_options);
+    channel = NULL;
+    session = NULL;
+  }
   mount_options = NULL;
 
   dlclose(library_handle_);

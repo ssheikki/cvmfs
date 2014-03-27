@@ -14,6 +14,7 @@ set (CVMFS_LOADER_SOURCES
   globals.h globals.cc
   loader_talk.h loader_talk.cc
   loader.h loader.cc
+  shell.h shell.cc
 )
 
 set (CVMFS_CLIENT_SOURCES
@@ -64,6 +65,7 @@ set (CVMFS2_DEBUG_SOURCES
   quota_listener.h quota_listener.cc
   auto_umount.h auto_umount.cc
   cvmfs.h cvmfs.cc
+  cvmfs_simple.h cvmfs_simple.cc
 )
 
 set (CVMFS2_SOURCES

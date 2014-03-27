@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <fuse/fuse_lowlevel.h>
+#include <sys/stat.h>
 
 #include <cstring>
 #include <string>
@@ -102,9 +103,9 @@ typedef std::vector<LoadEvent *> EventList;
  */
 struct LoaderExports {
   LoaderExports() :
-    version(2),
+    version(3),
     size(sizeof(LoaderExports)), boot_time(0), foreground(false),
-    disable_watchdog(false) {}
+    disable_watchdog(false), shell(0) {}
 
   uint32_t version;
   uint32_t size;
@@ -120,6 +121,39 @@ struct LoaderExports {
 
   // added with CernVM-FS 2.1.8 (LoaderExports Version: 2)
   bool disable_watchdog;
+
+  // Version 3
+  int shell;
+};
+
+
+struct CvmfsSimpleOps {
+  CvmfsSimpleOps() {
+    version = 1;
+    size = sizeof(CvmfsSimpleOps);
+    fnStat = NULL;
+    fnLs = NULL;
+    fnReadLink = NULL;
+    fnGetXattr = NULL;
+    fnListXattr = NULL;
+    fnOpen = NULL;
+    fnRead = NULL;
+    fnClose = NULL;
+  }
+
+  uint32_t version;
+  uint32_t size;
+
+  int (*fnStat)(const std::string &path, struct stat *info);
+  int (*fnLs)(const std::string &path, std::vector<std::string> *names);
+  int (*fnReadLink)(const std::string &path, const bool resolve_variables,
+                    std::string *link);
+  int (*fnGetXattr)(const std::string &path, const std::string &attr,
+                    std::string *value);
+  int (*fnListXattr)(const std::string &path, std::vector<std::string> *names);
+  int (*fnOpen)(const std::string &path);
+  ssize_t (*fnRead)(const int fd, off_t offset, size_t size, void *buf);
+  int (*fnClose)(const int fd);
 };
 
 
@@ -130,7 +164,7 @@ struct LoaderExports {
  */
 struct CvmfsExports {
   CvmfsExports() {
-    version = 1;
+    version = 2;
     size = sizeof(CvmfsExports);
     fnAltProcessFlavor = NULL;
     fnInit = NULL;
@@ -142,6 +176,7 @@ struct CvmfsExports {
     fnRestoreState = NULL;
     fnFreeSavedState = NULL;
     memset(&cvmfs_operations, 0, sizeof(cvmfs_operations));
+    simple_ops = NULL;
   }
 
   uint32_t version;
@@ -159,6 +194,9 @@ struct CvmfsExports {
   void (*fnFreeSavedState)(const int fd_progress,
                            const StateList &saved_states);
   struct fuse_lowlevel_ops cvmfs_operations;
+
+  // Version 2
+  struct CvmfsSimpleOps *simple_ops;
 };
 
 Failures Reload(const int fd_progress, const bool stop_and_go);
