@@ -40,12 +40,15 @@ publish_after_hook() { :; }
 if which httpd2 >/dev/null 2>&1; then #SLES/OpenSuSE
   APACHE_SERVICE="apache2"
   APACHE_CONF=${APACHE_SERVICE}
+  APACHE_BIN=$(which httpd2)
 elif which apache2 >/dev/null 2>&1; then # Debian based
   APACHE_SERVICE="apache2"
   APACHE_CONF=${APACHE_SERVICE}
+  APACHE_BIN=$(which apache2)
 else
   APACHE_SERVICE="httpd" # EL based
   APACHE_CONF=${APACHE_SERVICE}
+  APACHE_BIN="/usr/sbin/httpd"
 fi
 
 # Find the service binary
@@ -197,7 +200,8 @@ Supported Commands:
                 Print summary about the repository
   lstags        <fully qualified name>
                 Print named tags (snapshots) of the repository
-  check         [-c disable data chunk existence check]
+  check         [-c disable data chunk existence check] 
+                [-i check data integrity] (may take some time)]
                 [-t tag (check given tag instead of trunk)]
                 <fully qualified name>
                 Checks if the repository is sane
@@ -406,7 +410,7 @@ check_apache() {
 
 # retrieves the apache version string "2.x.xx"
 get_apache_version() {
-  ${APACHE_SERVICE} -v | head -n1 | \
+  ${APACHE_BIN} -v | head -n1 | \
     sed 's/^Server version: Apache\/\([0-9]\.[0-9]\.[0-9][0-9]*\).*$/\1/'
 }
 
@@ -543,6 +547,12 @@ contains() {
 }
 
 
+_cleanup_tmrc() {
+  local tmpdir=$1
+  umount ${tmpdir}/c > /dev/null 2>&1 || umount -l > /dev/null 2>&1
+  rm -fR ${tmpdir}   > /dev/null 2>&1
+}
+
 # for some reason `mount -o remount,(ro|rw) /cvmfs/$name` does not work on older
 # platforms if we set the SELinux context=... parameter in /etc/fstab
 # this dry-runs the whole mount, remount, unmount cycle to find out if it works
@@ -555,10 +565,9 @@ try_mount_remount_cycle_aufs() {
   mount -t aufs \
     -o br=${tmpdir}/a=ro:${tmpdir}/b=rw,ro,context=system_u:object_r:default_t:s0 \
     try_remount_aufs ${tmpdir}/c  > /dev/null 2>&1 || return 1
-  mount -o remount,rw ${tmpdir}/c > /dev/null 2>&1 || return 2
-  mount -o remount,ro ${tmpdir}/c > /dev/null 2>&1 || return 3
-  umount ${tmpdir}/c              > /dev/null 2>&1 || return 4
-  rm -fR ${tmpdir}
+  mount -o remount,rw ${tmpdir}/c > /dev/null 2>&1 || { _cleanup_tmrc $tmpdir; return 2; }
+  mount -o remount,ro ${tmpdir}/c > /dev/null 2>&1 || { _cleanup_tmrc $tmpdir; return 3; }
+  _cleanup_tmrc $tmpdir
   return 0
 }
 
@@ -571,10 +580,9 @@ try_mount_remount_cycle_overlayfs() {
   mount -t overlayfs \
     -o upperdir=${tmpdir}/b,lowerdir=${tmpdir}/a,ro,context=system_u:object_r:default_t:s0 \
     try_remount_overlayfs ${tmpdir}/c  > /dev/null 2>&1 || return 1
-  mount -o remount,rw ${tmpdir}/c > /dev/null 2>&1 || return 2
-  mount -o remount,ro ${tmpdir}/c > /dev/null 2>&1 || return 3
-  umount ${tmpdir}/c              > /dev/null 2>&1 || return 4
-  rm -fR ${tmpdir}
+  mount -o remount,rw ${tmpdir}/c > /dev/null 2>&1 || { _cleanup_tmrc $tmpdir; return 2; }
+  mount -o remount,ro ${tmpdir}/c > /dev/null 2>&1 || { _cleanup_tmrc $tmpdir; return 3; }
+  _cleanup_tmrc $tmpdir
   return 0
 }
 
@@ -877,6 +885,10 @@ reload_apache() {
    echo "done"
 }
 
+restart_apache() {
+  ${SERVICE_BIN} ${APACHE_SERVICE} restart > /dev/null
+}
+
 
 # lowers restrictions of hardlink creation if needed
 # allows AUFS to properly whiteout files without root privileges
@@ -920,7 +932,7 @@ ensure_enabled_apache_modules() {
 
   # restart apache if needed
   if [ $restart -ne 0 ]; then
-    ${SERVICE_BIN} ${APACHE_SERVICE} restart > /dev/null 2>&1 | { echo "Warning: Failed to restart apache after enabling necessary modules"; retcode=2; }
+    restart_apache 2>/dev/null | { echo "Warning: Failed to restart apache after enabling necessary modules"; retcode=2; }
   fi
 
   return $retcode
@@ -1957,15 +1969,19 @@ check() {
   local upstream
   local repository_dir
   local check_chunks=1
+  local check_integrity=0
   local tag=
 
   # optional parameter handling
   OPTIND=1
-  while getopts "ct:" option
+  while getopts "cit:" option
   do
     case $option in
       c)
         check_chunks=0
+      ;;
+      i)
+        check_integrity=1
       ;;
       t)
         tag="-t $OPTARG"
@@ -2001,10 +2017,16 @@ check() {
   repository_dir=$(get_upstream_config $upstream)
 
   # do it!
+  if [ $check_integrity -ne 0 ]; then
+    echo
+    echo "Checking Storage Integrity of $name ... (may take a while)"
+    cvmfs_swissknife scrub -r ${repository_dir}/data || die "FAIL!"
+  fi
+
   [ "x$CVMFS_LOG_LEVEL" != x ] && log_level_param="-l $CVMFS_LOG_LEVEL"
   [ $check_chunks -ne 0 ]      && check_chunks_param="-c"
 
-  echo "Verifying $name"
+  echo "Verifying Catalog Integrity of $name ..."
   cvmfs_swissknife check $tag $check_chunks_param $log_level_param -r $repository_dir
 }
 

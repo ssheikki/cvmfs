@@ -18,8 +18,8 @@ yum list installed | grep "kernel-module-aufs" > /dev/null || die "fail (check i
 echo "done"
 
 echo -n "activate aufs... "
-kobj=$(rpm -ql $(yum list installed | grep kernel-module-aufs) | tail -n1)
-insmod $kobj || die "fail"
+kobj=$(rpm -ql $(rpm -qa | grep kernel-module-aufs) | tail -n1)
+sudo /sbin/insmod $kobj || die "fail"
 echo "done"
 
 # install RPM packages
@@ -40,7 +40,7 @@ echo "done"
 
 # start apache
 echo -n "starting apache... "
-sudo service httpd start > /dev/null 2>&1 || die "fail"
+sudo /sbin/service httpd start > /dev/null 2>&1 || die "fail"
 echo "OK"
 
 # install test dependencies
