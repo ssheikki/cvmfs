@@ -200,7 +200,7 @@ void S3Uploader::WorkerThread() {
  * @param use_bucket Bucket to use between 0-(number_of_buckets_-1)
  * @return Index to the key to be used
  */
-int S3Uploader::getKeyIndex(unsigned int use_bucket) {
+int S3Uploader::getKeyIndex(unsigned int use_bucket) const {
   if(use_bucket >= (unsigned int)number_of_buckets_) {
     return 0;
   }
@@ -220,7 +220,7 @@ int S3Uploader::getKeyIndex(unsigned int use_bucket) {
 int S3Uploader::getKeysAndBucket(const std::string filename,
 				 std::string &access_key,
 				 std::string &secret_key,
-				 std::string &bucket_name) {
+				 std::string &bucket_name) const {
   unsigned int use_bucket = select_bucket(filename); 
   bucket_name = getBucketName(use_bucket);  
 
@@ -238,7 +238,7 @@ int S3Uploader::getKeysAndBucket(const std::string filename,
  * @param use_bucket Bucket to use between 0-(number_of_buckets_-1)
  * @return bucket name
  */
-std::string S3Uploader::getBucketName(unsigned int use_bucket) {
+std::string S3Uploader::getBucketName(unsigned int use_bucket) const {
   std::stringstream ss;
   if(use_bucket >= (unsigned int)number_of_buckets_) {
     ss<<bucket_body_name_<<"-1-1";
@@ -258,7 +258,7 @@ std::string S3Uploader::getBucketName(unsigned int use_bucket) {
  * @param rem_filename Filename to map into bucket
  * @return bucket index, between 0 and (number_of_buckets_-1)
  */
-int S3Uploader::select_bucket(std::string rem_filename) {
+int S3Uploader::select_bucket(std::string rem_filename) const {
     unsigned int use_bucket = 0;
     unsigned int cutlength= 3;     // Process filename in parts of this length
     std::string hex_filename;      // Filename with only valid hex-symbols
@@ -503,19 +503,36 @@ bool S3Uploader::Remove(const std::string& file_to_delete) {
     return false;
   }
 
-  LogCvmfs(kLogS3Fanout, kLogStderr, "Error: Remove is not implemented");
-  return false;
+  std::string access_key, secret_key, bucket_name;
+  getKeysAndBucket(file_to_delete, access_key, secret_key, bucket_name);
+
+  s3fanout::JobInfo *info = new s3fanout::JobInfo(access_key,
+                                                  secret_key,
+                                                  full_host_name_,
+                                                  bucket_name,
+                                                  file_to_delete,
+                                                  NULL,
+                                                  0);
+
+  bool retme = s3fanout_mgr->Delete(info);
+  delete info;
+  return retme;
 }
 
 
 bool S3Uploader::Peek(const std::string& path) const {
-  LogCvmfs(kLogS3Fanout, kLogStderr, "Error: Peek is not implemented");
-  return false;
-}
+  std::string access_key, secret_key, bucket_name;
+  getKeysAndBucket(path, access_key, secret_key, bucket_name);
 
+  s3fanout::JobInfo *info = new s3fanout::JobInfo(access_key,
+                                                  secret_key,
+                                                  full_host_name_,
+                                                  bucket_name,
+                                                  path,
+                                                  NULL,
+                                                  0);
 
-int S3Uploader::Move(const std::string &local_path,
-                        const std::string &remote_path) const {
-  LogCvmfs(kLogS3Fanout, kLogStderr, "Error: Move is not implemented");
-  return -1;
+  bool retme = s3fanout_mgr->Peek(info);
+  delete info;
+  return retme;
 }

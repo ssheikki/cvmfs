@@ -351,7 +351,7 @@ CURL *S3FanoutManager::AcquireCurlHandle() {
     //curl_easy_setopt(curl_default, CURLOPT_FAILONERROR, 1);
     curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, CallbackCurlHeader);
     curl_easy_setopt(handle, CURLOPT_READFUNCTION, CallbackCurlData);
-    //curl_easy_setopt(handle, CURLOPT_DNS_CACHE_TIMEOUT, 0);
+    curl_easy_setopt(handle, CURLOPT_DNS_CACHE_TIMEOUT, 0);
   } else {
     handle = *(pool_handles_idle_->begin());
     pool_handles_idle_->erase(pool_handles_idle_->begin());
@@ -402,7 +402,7 @@ string S3FanoutManager::MkAuthoritzation(const string &access_key,
     timestamp + "\n" +
     "x-amz-acl:public-read" + "\n" + // default ACL is public read
     "/" + bucket + "/" + object_key;
-  LogCvmfs(kLogS3Fanout, kLogDebug, "string to sign for: %s", object_key.c_str());
+  LogCvmfs(kLogS3Fanout, kLogDebug, "string to sign: %s", to_sign.c_str());
 
   shash::Any hmac;
   hmac.algorithm = shash::kSha1;
@@ -854,7 +854,7 @@ int S3FanoutManager::PopCompletedJobs(std::vector<s3fanout::JobInfo*> &jobs) {
 /**
  * Push new job to be uploaded to the S3 cloud storage.
  */
-int S3FanoutManager::PushNewJob(JobInfo *info) {	 
+int S3FanoutManager::PushNewJob(JobInfo *info) {
 
   sem_wait(&available_jobs_);
 
@@ -863,6 +863,94 @@ int S3FanoutManager::PushNewJob(JobInfo *info) {
   pthread_mutex_unlock(jobs_todo_lock_);
   
   return 0;
+}
+
+
+/**
+ * Check if the destination file exists in the URL.
+ * 
+ * @return true if exists, otherwise false
+ */
+bool S3FanoutManager::Peek(JobInfo *info) {
+  bool retme = false;
+  CURL *curll = curl_easy_init();
+  if(curll) {
+    info->error_code = kFailOk;
+    string url = url_constructor_->MkUrl(info->hostname, info->bucket, (info->object_key));
+    std::string timestamp = RfcTimestamp();
+    info->http_headers =
+      curl_slist_append(info->http_headers, ("Date: " + timestamp).c_str());
+    std::string acl = "x-amz-acl: public-read";
+    info->http_headers =
+      curl_slist_append(info->http_headers, acl.c_str());
+    info->http_headers =
+      curl_slist_append(info->http_headers,
+                        MkAuthoritzation(info->access_key,
+                                         info->secret_key,
+                                         timestamp, "", "HEAD", "",
+                                         info->bucket,
+                                         info->object_key).c_str());
+
+    curl_easy_setopt(curll, CURLOPT_URL, url.data());
+    curl_easy_setopt(curll, CURLOPT_HEADER, 0);
+    curl_easy_setopt(curll, CURLOPT_NOBODY, 1); 
+    curl_easy_setopt(curll, CURLOPT_HEADERFUNCTION, CallbackCurlHeader);
+    curl_easy_setopt(curll, CURLOPT_WRITEHEADER, static_cast<void *>(&info));
+    curl_easy_setopt(curll, CURLOPT_HTTPHEADER, info->http_headers);
+
+    CURLcode resl = curl_easy_perform(curll);
+    if(resl == CURLE_OK && info->error_code == kFailOk) {
+      retme = true;
+    }
+  }
+
+  curl_easy_cleanup(curll);
+  return retme;
+}
+
+
+/**
+ * Delete destination file
+ * 
+ * @return true if delete ok, otherwise false
+ */
+bool S3FanoutManager::Delete(JobInfo *info) {
+  bool retme = false;
+  CURL *curll = curl_easy_init();
+  if(curll) {
+    info->error_code = kFailOk;
+    info->http_headers = NULL;
+    string url = url_constructor_->MkUrl(info->hostname, info->bucket, (info->object_key));
+    std::string timestamp = RfcTimestamp();
+    info->http_headers =
+      curl_slist_append(info->http_headers, ("Date: " + timestamp).c_str());
+    std::string acl = "x-amz-acl: public-read";
+    info->http_headers =
+      curl_slist_append(info->http_headers, acl.c_str());
+    info->http_headers =
+      curl_slist_append(info->http_headers,
+                        MkAuthoritzation(info->access_key,
+                                         info->secret_key,
+                                         timestamp, "", "DELETE", "",
+                                         info->bucket,
+                                         info->object_key).c_str());
+
+    curl_easy_setopt(curll, CURLOPT_URL, url.data());
+    curl_easy_setopt(curll, CURLOPT_CUSTOMREQUEST, "DELETE"); 
+    curl_easy_setopt(curll, CURLOPT_HEADER, 0);
+    curl_easy_setopt(curll, CURLOPT_NOBODY, 1); 
+    curl_easy_setopt(curll, CURLOPT_HEADERFUNCTION, CallbackCurlHeader);
+    curl_easy_setopt(curll, CURLOPT_WRITEHEADER, static_cast<void *>(&info));
+    curl_easy_setopt(curll, CURLOPT_HTTPHEADER, info->http_headers);
+
+    CURLcode resl = curl_easy_perform(curll);
+    if(resl == CURLE_OK && info->error_code == kFailOk) {
+      retme = true;
+    }
+  }
+
+  curl_easy_cleanup(curll);
+  return retme;
 }
 
 

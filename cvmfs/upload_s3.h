@@ -72,9 +72,6 @@ namespace upload
    protected:
     void WorkerThread();
 
-    int Move(const std::string &local_path,
-             const std::string &remote_path) const;
-
     int CreateAndOpenTemporaryChunkFile(std::string *path) const;
 
    private:
@@ -89,10 +86,10 @@ namespace upload
     int getKeysAndBucket(const std::string filename,
 			 std::string &access_key,
 			 std::string &secret_key,
-			 std::string &bucket_name);
-    std::string getBucketName(unsigned int use_bucket);
-    int select_bucket(std::string rem_filename);
-    int getKeyIndex(unsigned int use_bucket);
+			 std::string &bucket_name) const;
+    std::string getBucketName(unsigned int use_bucket) const;
+    int select_bucket(std::string rem_filename) const;
+    int getKeyIndex(unsigned int use_bucket) const;
 
     // state information
     std::string full_host_name_;

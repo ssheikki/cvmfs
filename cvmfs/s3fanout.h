@@ -148,6 +148,9 @@ class S3FanoutManager {
                           const unsigned backoff_init_ms,
                           const unsigned backoff_max_ms);
 
+  bool Peek(JobInfo *info);
+  bool Delete(JobInfo *info);
+
   private:
   S3FanoutManager();
   ~S3FanoutManager();
